@@ -1,0 +1,22 @@
+
+
+run("Duplicate...", "duplicate");
+run("Z Project...", "projection=[Max Intensity]");
+run("Split Channels");
+
+close();
+
+setAutoThreshold("Default dark");
+//run("Threshold...");
+setOption("BlackBackground", false);
+run("Convert to Mask");
+run("Skeletonize");
+run("Summarize Skeleton");
+close();
+
+setAutoThreshold("Default dark");
+//run("Threshold...");
+setAutoThreshold("Yen dark");
+run("Convert to Mask");
+run("Skeletonize");
+run("Summarize Skeleton");
