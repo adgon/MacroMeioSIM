@@ -1,0 +1,414 @@
+###   Load libaries
+library(tidyr)
+library(dplyr)
+library(readxl)
+library(readr)
+library(lme4)
+library (glmmTMB)
+library(ggplot2)
+library(performance)
+library(gridExtra)
+library (ggeffects)
+library (DHARMa)
+library (emmeans)
+library (MuMIn)
+library(dunn.test)
+library(MASS)
+
+
+###   Set graphical parameters
+par(mfrow = c(1,1))
+
+
+
+###   Access raw dataset inputs (from Fiji outputs)
+diakinesis <- read_excel("R cytology/immuno 2.0/diakinesis.xlsx")
+SIM <- read.csv("~/R cytology/immuno 2.0/SIM.csv")
+
+
+### Define colors
+colors <- c("limegreen", "magenta", "orange", "dodgerblue")
+
+###  Create dicotomized variables
+  ## Minimum of accumulation for being relevant
+  coar_min <-12# Set the threshold: this is the 10 percentile of accumulation level of somatic and eary prophase cells
+  SIM <- mutate (SIM, relevant= SIM$accumulation > coar_min) # to create a column assessing whether cells haver relevant levels of accumulation
+  ###  Maximum of ASY1 microns to be consider as synapsed
+  syn_min <- 10 # Set the threshold of minimum synapsis for a cell to be considered fully synapsed
+  SIM <- mutate (SIM, synapsed= SIM$ASY1 < syn_min) # to create a column assessing whether cells are fully synapsed
+  ## Reorder the levels in the new updated
+  SIM$Genotype <- factor(SIM$Genotype, levels = c("DIP_2x", "NEO_4x", "HYB_4x", "EST_4x"))
+
+  
+### Set manually the HEI10 accumulation levels after which the number of detected foci resembles the number of crossovers the most (late pachytene cells)
+  lvldip <-45 # for DIP
+  lvlneo <-59.9 # for NEO
+  lvlhyb <-65.6 # for HYB
+  lvlest <-48.4 # for EST
+  
+  
+###filter by genotype
+DIP <- SIM %>% filter (Genotype == "DIP_2x") 
+NEO <- SIM %>% filter (Genotype == "NEO_4x")
+EST <- SIM %>% filter (Genotype == "EST_4x")
+HYB <- SIM %>% filter (Genotype == "HYB_4x")
+
+DIP$ASY1 <- 2*DIP$ASY1 #to double the values of DIP so it can be compared with tetraploids
+DIP$count <- 2*DIP$count #to double the values of DIP so it can be compared with tetraploids
+SIM <- bind_rows(DIP, NEO, HYB, EST) ## Update data
+SIM$Genotype <- factor(SIM$Genotype, levels = c("DIP_2x", "NEO_4x", "HYB_4x", "EST_4x"))  # Re-factor
+SIM <- arrange(SIM, desc(accumulation)) #to sort data by level of HEI10 accumulation 
+
+
+
+### Analyze the dynamics of decay of asynapsis
+
+#Select the data for the analysis
+  decay <- SIM #to assign the plane data
+  decay <- SIM %>% filter (relevant) #to assign the data with conditions
+  #decay <- data %>% filter (Plant != 1) #to assign the data with conditions
+
+  ## Fit models
+    
+    #Find the best GLMM model
+    glmm1 <- glmmTMB(ASY1 ~ accumulation * Genotype , data = decay, family = Gamma(link = "log"))
+    glmm2 <- glmmTMB(ASY1 ~ accumulation * Genotype * (1|Plant_name), decay, family = Gamma(link = "log"))
+    glmm3 <- glmmTMB(ASY1 ~ accumulation * Genotype * (1|Genotype), decay, family = Gamma(link = "log"))
+    glmm4 <- glmmTMB(ASY1 ~ accumulation * Genotype * (1|Genotype:Plant_name), decay, family = Gamma(link = "log"))
+    glmm5 <- glmmTMB(ASY1 ~ accumulation * Genotype , data = decay, family = gaussian())
+    glmm6 <- glmmTMB(ASY1 ~ accumulation * Genotype * (1|Plant_name), decay, gaussian())
+    glmm7 <- glmmTMB(ASY1 ~ accumulation * Genotype * (1|Genotype), decay, gaussian())
+    glmm8 <- glmmTMB(ASY1 ~ accumulation * Genotype * (1|Genotype:Plant_name), decay, gaussian())
+    
+    #Find the best GLMM model
+    compare_performance (glmm1, glmm2, glmm3, glmm4, glmm5, glmm6, glmm7, glmm8) #compare performance of the GLMMs
+    asy_decGLMM <- glmm4 #select the candidate model
+
+    #Model diagnostics
+    simulation1 <-simulateResiduals(fittedModel = asy_decGLMM, n = 1000, plot= TRUE) # check for assumptions in the residuals: 1. Normality, 2. No over- or under-dispersion, 3. No excess of outliers, 4 Homocestasticity
+    testZeroInflation (asy_decGLMM) #check for zero-inflation
+    testDispersion(asy_decGLMM) #check for under and over-dispersion
+    testQuantiles(simulation1) #check quantiles
+    plotResiduals(asy_decGLMM) # Check overal homoscedasticity
+    plotResiduals(asy_decGLMM, form= decay$Genotype) # Check homoscedasticity across Genotypes
+    plotResiduals(asy_decGLMM, form= decay$Plant_name) # Check homoscedasticity across plants
+    plotResiduals(asy_decGLMM, form= decay$accumulation) # Check homoscedasticity across accumulation
+    check_collinearity(glmmTMB(ASY1 ~ accumulation + Genotype + (1|Genotype:Plant_name), data = decay, ziformula=~0, family = ziGamma(link = "log"))) #check collinearity of variables of candidate model (interactions excluded)
+    check_singularity(asy_decGLMM) #check for singularity (if so means the model is to complex)
+    summary (asy_decGLMM) # summary of the model
+
+    
+  ## Define plot function for eameans results
+  plot_emmeans <- function(x) {
+    # Extract needed values
+    labels <- as.data.frame(x)[[1]]  # Extract the genotype names
+    emmeans <- as.data.frame(x)[[2]]  # Extract the emmeans mean values
+    SEs <- as.data.frame(x)[[3]]  # Extract the SEs
+    LCL <- as.data.frame(x)[[5]]  # Extract the lower confidence limit (LCL)
+    UCL <- as.data.frame(x)[[6]]  # Extract the upper confidence limit (UCL)
+    
+    # Plot with Confidence Intervals
+    min_ci <- if (min(LCL) > 0) 0 else min(LCL) #set lower y limit which will be 0 if the minimum value is >0 
+    max_ci <- max(UCL) # Set upper y limit
+    plot(emmeans, pch = 16, xlab = "", ylab = "", ylim = c(min_ci, max_ci), xaxt = "n", cex= 0, cex.axis = 1.15) # make the plot
+    axis(side = 1, at = 1:nrow(as.data.frame(x)), labels = labels, cex.axis = 1) #add axis labels
+    arrows(1:nrow(as.data.frame(x)), LCL, 1:nrow(as.data.frame(x)), UCL, angle = 90, code = 3, length = 0.0, col = adjustcolor(colors, alpha.f = 0.3), lwd = 6)  # Add confidence interval bars
+    points(1:nrow(as.data.frame(x)), emmeans, pch = 16, col = colors, cex = 1.1)  # Add data points with different colors
+  }
+  
+  
+  ## Analize intercepts with emmeans
+  query_intercept <- 12#set the X value at which you want to predict the intercept
+  asy_intercept <- emmeans(asy_decGLMM, "Genotype", at = list(accumulation = query_intercept), type = "response") # extract intercepts
+  asy_intercept # print intercepts
+  asy_test_intecept <- pairs(asy_intercept, adjust= "holm") # pairwise comparisons
+  asy_test_intecept
+  plot_emmeans (asy_intercept )
+ 
+
+  ## Analyze response to accumulation with eammeans 
+  asy_interactions <- emtrends(asy_decGLMM,  ~ Genotype, var = "accumulation")
+  asy_interactions
+  asy_test_interactions<- pairs(asy_interactions, adjust= "holm")
+  asy_test_interactions  
+  plot_emmeans (asy_interactions)
+ 
+   
+  ## Check if the decay exponent is significativaly different from 0 (if the p value is significant)
+  summary (asy_decGLMM) #check p value for the accumulation coeficient in the reference group (DIP)
+  decay$Genotype <- factor(decay$Genotype, levels = c( "NEO_4x", "HYB_4x", "EST_4x","DIP_2x")) # refactor to change the reference genotype
+  newref <- glmmTMB(ASY1 ~ accumulation * Genotype * (1|Genotype:Plant_name), data = decay, family = Gamma(link = "log")) # fit the model again after changing the reference genotype
+  summary (newref)#check p value for the accumulation coeficient in the reference group (NEO)
+  decay$Genotype <- factor(decay$Genotype, levels = c( "HYB_4x", "EST_4x","DIP_2x", "NEO_4x"))# refactor to change the reference genotype
+  newref <- glmmTMB(ASY1 ~ accumulation * Genotype * (1|Genotype:Plant_name), data = decay, family = Gamma(link = "log"))# fit the model again after changing the reference genotype
+  summary (newref) #check p value for the accumulation coeficient in the reference group (HYB)   
+  decay$Genotype <- factor(decay$Genotype, levels = c(  "EST_4x","DIP_2x", "NEO_4x", "HYB_4x"))# refactor to change the reference genotype
+  newref <- glmmTMB(ASY1 ~ accumulation * Genotype * (1|Genotype:Plant_name), data = decay, family = Gamma(link = "log"))# fit the model again after changing the reference genotype
+  summary (newref) #check p value for the accumulation coeficient in the reference group (EST)    
+  decay$Genotype <- factor(decay$Genotype, levels = c( "DIP_2x", "NEO_4x", "HYB_4x", "EST_4x"))# refactor to change the reference genotype
+ 
+  
+  ##Plot  models
+  
+    #Plot normal model
+    prediction <- predict_response(asy_decGLMM, terms = c("accumulation [0:100]", "Genotype")) # predict the trend line
+    plot(prediction, facet = TRUE, show_data = TRUE, colors = colors, limit_range = FALSE) + #plot the treend line plus data points
+      scale_y_continuous(limits = c(0, 600), breaks = seq(0, 500, by = 100))
+    #Plot colapsed model  without data
+    prediction <- predict_response(asy_decGLMM, terms = c("accumulation [0:100]", "Genotype")) # predict the trend line
+    plot(prediction, facet = FALSE, colors = colors, limit_range = FALSE)+ #plot the treend line plus data points
+      scale_y_continuous(limits = c(0, 530), breaks = seq(0, 540, by = 100))+
+      geom_vline(xintercept = c(coar_min, lvldip,lvlneo,lvlhyb,lvlest), linetype = "dotted", color = "black") 
+    
+    #Plot model if you want to plot the trend line of the right model (after 12%) but with all the data points
+    x<-asy_decGLMM
+    y <- glmmTMB(ASY1 ~ accumulation * Genotype * (1|Plant_name), data = SIM, family = Gamma(link = "log")) #store the model with all dat apoints 
+    y$fit <- asy_decGLMM$fit  #to manipulate the coefficients model with all data points, to be replaced with the trend line with only relevant data points
+    predictiony <- predict_response(y, terms = c("accumulation [0:100]", "Genotype")) # predict the trend line
+    plot(predictiony, facet = TRUE, show_data = TRUE, colors = colors, limit_range = FALSE) +
+      scale_y_continuous(limits = c(0, 620), breaks = seq(0, 620, by = 100)) + 
+      geom_vline(xintercept = coar_min, linetype = "dotted", color = "black") 
+    
+    #Plot model if you want to plot the trend line of the right model (after 12%) but with all the data points (small scale)
+    x<-asy_decGLMM
+    y <- glmmTMB(ASY1 ~ accumulation * Genotype * (1|Plant_name), data = SIM, family = Gamma(link = "log")) #store the model with all dat apoints 
+    y$fit <- asy_decGLMM$fit  #to manipulate the coefficients model with all data points, to be replaced with the trend line with only relevant data points
+    predictiony <- predict_response(y, terms = c("accumulation [0:100]", "Genotype")) # predict the trend line
+    plot(predictiony, facet = TRUE, show_data = TRUE, colors = colors, limit_range = FALSE) +
+      scale_y_continuous(limits = c(0, 260), breaks = seq(0, 260, by = 100)) + 
+      geom_vline(xintercept = coar_min, linetype = "dotted", color = "black") 
+
+    
+  ##Separate plots for individual plants
+    plants_glmm<- glmmTMB(ASY1 ~ accumulation * Plant_name , data = SIM, family = Gamma(link = "log")) 
+    prediction <- predict_response(plants_glmm, terms = c("accumulation [0:100]", "Plant_name")) # predict the trend line
+    colors16<- colors <- c("magenta", "dodgerblue", "orange", "magenta", "orange", "limegreen", "orange", "limegreen", 
+                           "magenta", "magenta", "magenta", "limegreen", "limegreen", "dodgerblue", 
+                           "magenta", "dodgerblue", "dodgerblue")
+    plot(prediction, facet = TRUE , show_data = TRUE, colors = colors16, limit_range = FALSE) + # plot the trend line plus data points
+      scale_y_continuous(limits = c(0, 600), breaks = seq(0, 600, by = 100))
+    
+    
+###   Modeling final levels of asynapsis
+  
+  
+  ## Set the window of HEI10 accumulation levels
+  lower <- 49
+  upper <- 100
+  bins <- filter (decay, decay$accumulation >= lower & decay$accumulation <= upper)
+  
+  
+  ## Check at what level of HEI10 accumulation the decay exponent is not  significantly different from 0 (if the p value is significant
+  
+    # Model diagnostics
+    slopemodel <- glmmTMB(ASY1 ~ accumulation * Genotype * (1|Genotype:Plant_name), data = bins, family = Gamma(link = "log")) # fit the model 
+    simulation1 <-simulateResiduals(fittedModel = slopemodel, n = 1000, plot= TRUE) # extract for assumptions in the residuals: 1. Normality, 2. No over- or under-dispersion, 3. No excess of outliers, 4 Homocestasticity
+    # Check slopes 
+    bins$Genotype <- factor(bins$Genotype, levels = c( "DIP_2x", "NEO_4x", "HYB_4x", "EST_4x"))# refactor to change the reference genotype
+    newref <- glmmTMB(ASY1 ~ accumulation * Genotype * (1|Genotype:Plant_name), data = bins, family = Gamma(link = "log")) # fit the model again after changing the reference genotype
+    (summary (newref))$coefficients$cond [26] #extract p value for the accumulation coeficient in the reference group (DIP)
+    bins$Genotype <- factor(bins$Genotype, levels = c( "NEO_4x", "HYB_4x", "EST_4x","DIP_2x")) # refactor to change the reference genotype
+    newref <- glmmTMB(ASY1 ~ accumulation * Genotype * (1|Genotype:Plant_name), data = bins, family = Gamma(link = "log")) # fit the model again after changing the reference genotype
+    (summary (newref))$coefficients$cond [26] #extract p value for the accumulation coeficient in the reference group (NEO)
+    bins$Genotype <- factor(bins$Genotype, levels = c( "HYB_4x", "EST_4x","DIP_2x", "NEO_4x"))# refactor to change the reference genotype
+    newref <- glmmTMB(ASY1 ~ accumulation * Genotype * (1|Genotype:Plant_name), data = bins, family = Gamma(link = "log"))# fit the model again after changing the reference genotype
+    (summary (newref))$coefficients$cond [26]  #extract p value for the accumulation coeficient in the reference group (HYB)   
+    bins$Genotype <- factor(bins$Genotype, levels = c(  "EST_4x","DIP_2x", "NEO_4x", "HYB_4x"))# refactor to change the reference genotype
+    newref <- glmmTMB(ASY1 ~ accumulation * Genotype * (1|Genotype:Plant_name), data = bins, family = Gamma(link = "log"))# fit the model again after changing the reference genotype
+    (summary (newref))$coefficients$cond [26]  #extract p value for the accumulation coeficient in the reference group (EST)    
+    bins$Genotype <- factor(bins$Genotype, levels = c( "DIP_2x", "NEO_4x", "HYB_4x", "EST_4x"))# refactor to change the reference genotype
+    #Get the stats  
+    genotype_stats <- aggregate(ASY1 ~ Genotype, data = bins, FUN = function(x) c(mean = mean(x), sd = sd(x), n = length(x)))
+    genotype_stats
+  
+  
+  ## Fit models
+  modeltest1 <- glmmTMB(ASY1 ~  Genotype * (1|Genotype:Plant_name), data = bins, family = Gamma(link = "log"))
+  modeltest2 <- glmmTMB(ASY1 ~  Genotype * (1|Genotype:Plant_name), data = bins, family = gaussian)
+  modeltest3 <- glmmTMB(ASY1 ~  Genotype * (1|Genotype:Plant_name), data = bins, family = gaussian(link = "log"))
+  
+  ##Compare performance of models  
+  compare_performance (modeltest1, modeltest2, modeltest3) #compare perfomrance of the GLMMs
+  
+  asy_midGLMM <- modeltest1#select candidate to  best model
+  
+  #Model diagnostics
+  simulation1 <-simulateResiduals(fittedModel = asy_midGLMM, n = 1000, plot= TRUE) # check for assumptions in the residuals: 1. Normality, 2. No over- or under-dispersion, 3. No excess of outliers, 4 Homocestasticity
+  testZeroInflation (asy_midGLMM) #check for zero-inflation
+  testDispersion(asy_midGLMM) #check for under and over-dispersion
+  testQuantiles(simulation1) #check quantiles
+  plotResiduals(asy_midGLMM) # Check overal homoscedasticity
+  plotResiduals(asy_midGLMM, form= bins$Genotype) # Check homoscedasticity across Genotypes
+  plotResiduals(asy_midGLMM, form= bins$Plant_name) # Check homoscedasticity across plants
+  plotResiduals(asy_midGLMM, form= bins$accumulation) # Check homoscedasticity across accumulation
+  check_singularity(asy_decGLMM) #check for singularity (if so means the model is to complex)
+  summary (asy_midGLMM) # summary of the model
+  
+  
+  ## Analize means and tests with emmeans
+  finalsyn_mean <- emmeans(asy_midGLMM,  ~Genotype, type = "response")
+  finalsyn_mean # print means
+  finalsyn_test <-  pairs(finalsyn_mean, adjust= "holm")  # pairwise comparisons
+  finalsyn_test
+  
+  
+  ## Make a plot  
+    # Reorder the levels
+    bins$Genotype <- factor(bins$Genotype, levels = c("DIP_2x", "NEO_4x", "HYB_4x", "EST_4x"))
+    
+    # Create a ggplot with boxplots
+    boxplot_plot <- ggplot(bins, aes(x = Genotype, y = ASY1, color = Genotype)) +
+      geom_boxplot(outlier.shape = NA, fill = "transparent") +  # Fill boxes with transparency
+      labs(x = NULL, y = NULL) +
+      scale_color_manual(values = c("DIP_2x" = "limegreen", "NEO_4x" = "magenta", "HYB_4x" = "orange", "EST_4x" = "dodgerblue")) +
+      theme(axis.text.y = element_text(size = 12))
+    
+    # Overlay jittered points
+    boxplot_plot + geom_jitter(data = bins, width = 0.3, alpha = 0.25,
+                               aes(x = Genotype, y = ASY1, color = Genotype))
+    
+  ## Make a plot without NEO 
+  noNEO <- filter (bins, Genotype != "NEO_4x") #to filter Plant 1 out
+    # Create a ggplot with boxplots
+    boxplot_plot <- ggplot(noNEO, aes(x = Genotype, y = ASY1, color = Genotype)) +
+      geom_boxplot(outlier.shape = NA, fill = "transparent") +  # Fill boxes with transparency
+      labs(x = NULL, y = NULL) +
+      scale_color_manual(values = c("DIP_2x" = "limegreen", "HYB_4x" = "orange", "EST_4x" = "dodgerblue")) +
+      theme(axis.text.y = element_text(size = 12))
+    
+    # Overlay jittered points
+    boxplot_plot + geom_jitter(data = noNEO, width = 0.3, alpha = 0.25,
+                               aes(x = Genotype, y = ASY1, color = Genotype))
+    
+  
+  
+### Model relationship between asynapsis and crossover number  
+  
+ ## Filter for cells with HEI10 foci resembling crossover number (levels set above) sorted by genotype.
+  late_DIP <- DIP %>% filter (accumulation >= lvldip)
+  late_NEO <- NEO %>% filter (accumulation >= lvlneo)
+  late_HYB <- HYB %>% filter (accumulation >= lvlhyb)
+  late_EST <- EST %>% filter (accumulation >= lvlest)
+  late_data <- bind_rows(late_DIP,late_NEO,late_HYB, late_EST, )
+  
+
+##Fit models for the relatioship between asynapsis and crossover number  
+  corr1 <- glmmTMB(count ~  ASY1 * (1|Genotype:Plant_name), data = late_data, family = poisson())
+  corr2 <- glmmTMB(count ~  ASY1 * (1|Genotype:Plant_name), data = late_data, family = nbinom2 ())
+  corr3 <- glmmTMB(count ~  log (ASY1+1) * (1|Genotype:Plant_name), data = late_data, family = poisson())
+  corr4 <- glmmTMB(count ~  log (ASY1+1) * (1|Genotype:Plant_name), data = late_data, family = nbinom2 ())
+  corr5 <- glmmTMB(count ~  log (ASY1+1) , data = late_data, family =  poisson())
+  corr6 <- glm.nb(count ~  log (ASY1+1) , data = late_data)
+
+ ##Find the best GLMM model
+  compare_performance (corr1, corr2, corr3, corr4, corr5, corr6) #compare performance of the GLMMs
+  correlation <- corr5 #select the candidate model
+  
+ ##Model diagnostics
+  check_singularity(correlation) #check for singularity (if so means the model is to complex)
+  simulation1 <-simulateResiduals(fittedModel = correlation, n = 1000, plot= TRUE) # check for assumptions in the residuals: 1. Normality, 2. No over- or under-dispersion, 3. No excess of outliers, 4 Homocestasticity
+  testZeroInflation (correlation) #check for zero-inflation
+  testDispersion(correlation) #check for under and over-dispersion
+  testQuantiles(simulation1) #check quantiles
+  plotResiduals(correlation) # Check overal homoscedasticity
+  plotResiduals(correlation, form= late_data$Genotype) # Check homoscedasticity across Genotypes
+  plotResiduals(correlation, form= late_data$Plant_name) # Check homoscedasticity across plants
+  check_collinearity(glmmTMB(count ~ ASY1 + Genotype + (1|Genotype:Plant_name), data = decay, ziformula=~0, family = ziGamma(link = "log"))) #check collinearity of variables of candidate model (interactions excluded)
+  summary (correlation) # summary of the model
+
+ ##Plot the model (both if it is a GLM or GLMM)
+  prediction <- predict_response(correlation, terms = c("ASY1 [0:650]"))  # plot the trend line plus data points
+    
+  plot(prediction, facet = FALSE, show_data = TRUE, colors = "gray19", limit_range = FALSE) + # plot the trend line plus data points
+    scale_y_continuous(limits = c(10, 40), breaks = seq(10, 40, by = 10))+
+    geom_point(aes(x = ASY1, y =count), colour = "limegreen", data = late_DIP) +
+    geom_point(aes(x = ASY1, y =count), colour = "magenta", data = late_NEO) +
+    geom_point(aes(x = ASY1, y =count), colour = "orange", data = late_HYB) +
+    geom_point(aes(x = ASY1, y =count), colour = "dodgerblue", data = late_EST)
+  
+
+###Analyze differences in crossover number between cells with and without major asynapsis
+  
+  late_data$extasy <- late_data$ASY1 > 10 # Set the number of microns of ASY1 to be considered as extensive asynapsis
+  
+  extasy1 <- glmmTMB(count  ~  extasy * (1|Genotype:Plant_name), data = late_data, family = poisson())
+  extasy2 <- glmmTMB(count  ~  extasy * (1|Genotype:Plant_name), data = late_data, family = nbinom2())
+  extasy3 <- glmmTMB(count  ~  extasy * (1|Plant_name), data = late_data, family = poisson())
+  extasy4 <- glmmTMB(count  ~  extasy * (1|Genotype), data = late_data, family = poisson())
+  extasy5 <- glmmTMB(count  ~  extasy, data = late_data, family = poisson())
+  
+  #Find the best GLMM model
+  compare_performance (extasy1, extasy2, extasy3, extasy4 , extasy5) #compare performance of the GLMMs
+  extasy_glmm <- extasy5
+  
+  #Model diagnostics
+  check_singularity(extasy_glmm) #check for singularity (if so means the model is to complex)
+  simulation1 <-simulateResiduals(fittedModel = extasy_glmm, n = 1000, plot= TRUE) # check for assumptions in the residuals: 1. Normality, 2. No over- or under-dispersion, 3. No excess of outliers, 4 Homocestasticity
+  testZeroInflation (extasy_glmm) #check for zero-inflation
+  testDispersion(extasy_glmm) #check for under and over-dispersion
+  testQuantiles(simulation1) #check quantiles
+  plotResiduals(extasy_glmm) # Check overal homoscedasticity
+  plotResiduals(extasy_glmm, form= late_data$extasy) # Check homoscedasticity across Genotypes
+  plotResiduals(extasy_glmm, form= late_data$Genotype) # Check homoscedasticity across Genotypes
+  plotResiduals(extasy_glmm, form= late_data$Plant_name) # Check homoscedasticity across plants
+  check_collinearity(glmmTMB(ASY1 ~ accumulation + Genotype + (1|Genotype:Plant_name), data = late_data, ziformula=~0, family = ziGamma(link = "log"))) #check collinearity of variables of candidate model (interactions excluded)
+  check_singularity(extasy_glmm) #check for singularity (if so means the model is to complex)
+  summary (extasy_glmm) # summary of the model
+  
+  
+  ## Analize emmeans
+  extnoext <- emmeans(extasy_glmm, "extasy", type = "response") # extract intercepts
+  extnoext # print intercepts
+  pairs(extnoext, adjust= "holm") # pairwise comparisons
+  
+  
+  
+  # Create the ggplot with boxplots
+  boxplot_plot <- ggplot(late_data, aes(x = extasy, y = count, color = extasy)) +
+    geom_boxplot(outlier.shape = NA, fill = "transparent") +  # Fill boxes with transparency
+    labs(x = NULL, y = NULL) +
+    scale_color_manual(values = c("TRUE" = "red", "FALSE" = "black")) +
+    theme(axis.text.y = element_text(size = 12)) +
+    ylim(0, 40)
+  
+  # Add the dot plot layer
+  boxplot_plot + 
+    geom_dotplot(data = late_data, binaxis = "y", stackdir = "center", 
+                 dotsize = 0.5, alpha = 0.25, 
+                 aes(x = extasy, y = count, fill = extasy),  # Map fill to extasy
+                 color = "black") +  # Static outline color
+    scale_fill_manual(values = c("TRUE" = "red", "FALSE" = "black"))  # Define fill colors
+  
+  
+  
+###Verify the effect of colchicine
+  
+  #Select the data for the analysis
+  decayneo <- NEO #to assign the plane data
+  decayneo <- NEO %>% filter (relevant) #to assign the data with conditions
+  
+ ## Fit models
+ 
+  #Find the best GLMM model
+  colchi1 <- glmmTMB(ASY1 ~ accumulation * colchicine * (1|Plant_name), decayneo, family = Gamma(link = "log"))
+  model_performance (colchi1) # check performance
+  colchi_GLMM <- colchi1 #select the candidate model
+  
+ ##Model diagnostics
+  simulation1 <-simulateResiduals(fittedModel = colchi_GLMM, n = 1000, plot= TRUE) # check for assumptions in the residuals: 1. Normality, 2. No over- or under-dispersion, 3. No excess of outliers, 4 Homocestasticity
+  testZeroInflation (colchi_GLMM) #check for zero-inflation
+  testDispersion(colchi_GLMM) #check for under and over-dispersion
+  testQuantiles(simulation1) #check quantiles
+  plotResiduals(colchi_GLMM) # Check overal homoscedasticity
+  plotResiduals(colchi_GLMM, form= decayneo$Plant_name) # Check homoscedasticity across plants
+  plotResiduals(colchi_GLMM, form= decayneo$accumulation) # Check homoscedasticity across accumulation
+  check_collinearity(glmmTMB(ASY1 ~ accumulation + colchicine * (1|Plant_name), decayneo, family = Gamma(link = "log"))) #check collinearity of variables of candidate model (interactions excluded)
+  check_singularity(asy_decGLMM) #check for singularity (if so means the model is to complex)
+  summary (colchi_GLMM) # summary of the model
+  
+  
+
+  
+  
+  write_excel_csv (SIM, file = "C:/Users/adri/Documents/R cytology/immuno 2.0/SIM4.csv") 
+  
