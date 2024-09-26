@@ -1,0 +1,190 @@
+###   Load libaries
+library(tidyr)
+library(dplyr)
+library(readxl)
+library(readr)
+library(lme4)
+library (glmmTMB)
+library(ggplot2)
+library(performance)
+library(gridExtra)
+library (ggeffects)
+library (DHARMa)
+library (emmeans)
+library (MuMIn)
+library(dunn.test)
+
+
+
+###   Set graphical parameters
+par(mfrow = c(1,1))
+
+
+
+###   Access raw dataset inputs (from Fiji outputs)
+files <- read_csv("~/R cytology/immuno 2.0/files.csv")
+diakinesis <- read_excel("R cytology/immuno 2.0/diakinesis.xlsx")
+SIM <- read.csv("~/R cytology/immuno 2.0/SIM0.csv")
+
+
+
+
+###filter by genotype
+crossovers_dip <- diakinesis %>% filter (Genotype == "DIP_2x") 
+crossovers_neo <- diakinesis %>% filter (Genotype == "NEO_4x")
+crossovers_hyb <- diakinesis %>% filter (Genotype == "EST_4x")
+crossovers_est <- diakinesis %>% filter (Genotype == "HYB_4x")
+
+
+
+
+### Analyze the number of Diakinesis HEI10 foci (crossovers)
+
+  ## Reorder the levels in the new dataset
+  diakinesis$Genotype <- factor(diakinesis$Genotype, levels = c("DIP_2x", "NEO_4x", "HYB_4x", "EST_4x"))
+
+  ## Create a box plot
+    boxplot_plot <- ggplot(diakinesis, aes(x = Genotype, y = foci, color = Genotype)) +
+    geom_boxplot (outlier.shape = NA, fill = "transparent", width = 0.75) +  # Fill boxes with transparency
+    labs(x = "Genotype", y = "HEI10 foci") +
+    scale_color_manual(values = c("DIP_2x" = "limegreen", "NEO_4x" = "magenta", "HYB_4x" = "orange", "EST_4x" = "dodgerblue"))+
+    ylim(0, 40)+
+      theme(axis.text.x = element_text(size = 0),  # Adjust font size of x-axis labels
+            axis.text.y = element_text(size = 20))  # Set the y-axis limits
+    
+    boxplot_plot + 
+      geom_jitter(data = diakinesis, width = 0.2, height = 0.1,  alpha = 0.25,
+                  aes(x = Genotype, y = foci, color = Genotype))
+    
+    boxplot_plot + 
+      geom_jitter(data = diakinesis, width = 0.2, height = 0.1,  alpha = 0.25,
+                  aes(x = Genotype, y = foci, color = Genotype)) + 
+      geom_violin(data = diakinesis, width = 1, alpha = 0.2, 
+                  aes(x = Genotype, y = foci, color = Genotype) , bw=0.5)
+    
+  
+  ## Diakinesis results
+    # Calculate aggregate statistics
+    dk_means <- aggregate(diakinesis$foci, by = list(Category = diakinesis$Genotype), FUN = mean)
+    dk_sd <- aggregate(diakinesis$foci, by = list(Category = diakinesis$Genotype), FUN = sd)
+    dk_median <- aggregate(diakinesis$foci, by = list(Category = diakinesis$Genotype), FUN = median)
+    dk_mad <- aggregate(diakinesis$foci, by = list(Category = diakinesis$Genotype), FUN =  mad)
+    dk_n <- aggregate(diakinesis$foci, by = list(Category = diakinesis$Genotype), FUN = length)
+    # Merge the data frames
+    co_table <- merge(dk_means, dk_sd, by = "Category", suffixes = c("_mean", "_sd"))
+    co_table <- merge(co_table, dk_median, by = "Category")
+    co_table <- merge(co_table, dk_mad, by = "Category")
+    co_table <- merge(co_table, dk_n, by = "Category")
+    # Rename columns
+    names(co_table) <- c("Category", "mean", "sd", "median", "mad", "n")
+  
+  
+  #Double teh foci number of DIP for comparison  
+    crossovers_dip$foci <- 2*crossovers_dip$foci #to double the values of DIP so it can be compared with tetraploids
+    diakinesis <- bind_rows(crossovers_dip, crossovers_neo, crossovers_hyb, crossovers_est) ## Update SIM
+    diakinesis$Genotype <- factor(diakinesis$Genotype, levels = c("DIP_2x", "NEO_4x", "HYB_4x", "EST_4x"))  # Re-factor
+    
+
+  #After the test half crossover number back for later analyses
+  crossovers_dip$foci <- 1/2*crossovers_dip$foci #to double the values of DIP so it can be compared with tetraploids
+  diakinesis <- bind_rows(crossovers_dip, crossovers_neo, crossovers_hyb, crossovers_est) ## Update SIM
+  diakinesis$Genotype <- factor(diakinesis$Genotype, levels = c("DIP_2x", "NEO_4x", "HYB_4x", "EST_4x"))  # Re-factor
+  
+  
+### To make separate datasets for each genotype
+
+    SIM <- arrange(SIM, desc(accumulation)) #to sort data by level of HEI10 accumulation
+    
+  ##filter by genotype
+    DIP <- SIM %>% filter (Genotype == "DIP_2x") 
+    NEO <- SIM %>% filter (Genotype == "NEO_4x")
+    EST <- SIM %>% filter (Genotype == "EST_4x")
+    HYB <- SIM %>% filter (Genotype == "HYB_4x")
+  
+  
+  ## Set manually the HEI10 accumulation levels after which the number of detected foci resembles the number of crossovers the most (late pachytene cells)
+  lvldip <-45
+  lvlneo <-59.9
+  lvlhyb <-65.6
+  lvlest <-48.4
+  
+  ## Determine which cells are late pachytene (accumulation greater than critical value)
+  DIP$late <- DIP$accumulation >= lvldip
+  NEO$late <- NEO$accumulation >= lvlneo
+  HYB$late <- HYB$accumulation >= lvlhyb
+  EST$late <- EST$accumulation >= lvlest
+  
+  ## Filter for late pachytene cells
+  late_DIP <- DIP %>% filter (accumulation >= lvldip)
+  late_NEO <- NEO %>% filter (accumulation >= lvlneo)
+  late_HYB <- HYB %>% filter (accumulation >= lvlhyb)
+  late_EST <- EST %>% filter (accumulation >= lvlest)
+  late_data<- bind_rows(late_DIP, late_NEO, late_HYB, late_EST)
+  
+  
+  
+  SIM <- bind_rows(DIP, NEO, HYB, EST) ## Update SIM
+  SIM$Genotype <- factor(SIM$Genotype, levels = c("DIP_2x", "NEO_4x", "HYB_4x", "EST_4x"))  # Re-factor
+  SIM <- arrange(SIM, desc(accumulation)) #to sort data by level of HEI10 accumulation 
+  
+  
+### Compare detected foci in late pachytene cells with crossovers scored in diakinesis-diplotene cells
+    
+  ##For DIP
+    foci_dip<- late_DIP %>% mutate (type = "foci")  %>% dplyr::select (count, Plant_name, type) #select and store the foci detected 
+    crossovers_dip <- diakinesis %>% mutate (Plant_name = "fixed_DIP") %>% mutate (type = "crossover") %>% mutate (count = foci) %>%  filter (Genotype=="DIP_2x") %>% select (count, Plant_name, type) #select and store the crossovers scored 
+    cofoci_dip <- bind_rows (foci_dip, crossovers_dip) # merge SIMset with detected foci and scored crossovers
+    cofoci_dip <- cofoci_dip %>% mutate (class = paste0("dip_",cofoci_dip$type) ) # add a class column
+    ks.test(foci_dip$count,crossovers_dip$count) #do Kolmogorov-Smirnov test to compare distrbutions
+    var.test (foci_dip$count,crossovers_dip$count) #do variance test
+    cotest_dip<- t.test (foci_dip$count,crossovers_dip$count) [3] #store p-value from t-test
+    
+  ##For NEO
+    foci_neo<- late_NEO %>% mutate (type = "foci")  %>% dplyr::select (count, Plant_name, type) #select and store the foci detected 
+    crossovers_neo <- diakinesis %>% mutate (Plant_name = "fixed_neo") %>% mutate (type = "crossover") %>% mutate (count = foci) %>%  filter (Genotype=="NEO_4x") %>% select (count, Plant_name, type)#select and store the crossovers scored
+    cofoci_neo <- bind_rows (foci_neo, crossovers_neo) # merge SIMset with detected foci and scored crossovers
+    cofoci_neo <- cofoci_neo %>% mutate (class = paste0("neo_",cofoci_neo$type) ) # add a class column
+    cotest_neo <- ks.test(foci_neo$count,crossovers_neo$count) #do Kolmogorov-Smirnov test to compare distrbutions 
+    var.test(foci_neo$count,crossovers_neo$count) #do variance test
+    cotest_neo <- t.test(foci_neo$count,crossovers_neo$count)[3] #store p-value from t-test
+    
+  ##For HYB
+    foci_hyb<- late_HYB %>% mutate (type = "foci")  %>% dplyr::select (count, Plant_name, type) #select and store the foci detected 
+    crossovers_hyb <- diakinesis %>% mutate (Plant_name = "fixed_hyb") %>% mutate (type = "crossover") %>% mutate (count = foci) %>%  filter (Genotype=="HYB_4x") %>% select (count, Plant_name, type)#select and store the crossovers scored
+    cofoci_hyb <- bind_rows (foci_hyb, crossovers_hyb) # merge SIMset with detected foci and scored crossovers
+    cofoci_hyb <- cofoci_hyb %>% mutate (class = paste0("hyb_",cofoci_hyb$type) ) # add a class column
+    ks.test(foci_hyb$count,crossovers_hyb$count) #do Kolmogorov-Smirnov test to compare distrbutions 
+    var.test (foci_hyb$count,crossovers_hyb$count) #do variance test
+    cotest_hyb<- t.test (foci_hyb$count,crossovers_hyb$count)[3] #store p-value from t-test
+    
+  ##For EST  
+    foci_est<- late_EST %>% mutate (type = "foci")  %>% dplyr::select (count, Plant_name, type) #select and store the foci detected 
+    crossovers_est <- diakinesis %>% mutate (Plant_name = "fixed_est") %>% mutate (type = "crossover") %>% mutate (count = foci) %>%  filter (Genotype=="EST_4x") %>% select (count, Plant_name, type)#select and store the crossovers scored
+    cofoci_est <- bind_rows (foci_est, crossovers_est) # merge SIMset with detected foci and scored crossovers
+    cofoci_est <- cofoci_est %>% mutate (class = paste0("est_",cofoci_est$type) ) # add a class column
+    ks.test(foci_est$count,crossovers_est$count) #do Kolmogorov-Smirnov test to compare distrbutions   
+    var.test (foci_est$count,crossovers_est$count) #do variance test
+    t.test (foci_est$count,crossovers_est$count) #do t-test
+    cotest_est<-  wilcox.test(foci_est$count,crossovers_est$count)[3] #store p-value (t-test can't be used as variances are different. Mann-Whithney used, instead )
+    
+  ## Process p-values
+  p_cofoci<- c(cotest_dip,cotest_neo,cotest_hyb,cotest_est) #concatenate p-values
+  adjusted_p_cofoci <- p.adjust(p_cofoci, method = "holm") #adjust p-values
+  
+  ## Arrange all data
+  cofoci<- bind_rows (cofoci_dip, cofoci_neo, cofoci_hyb, cofoci_est) # reunite data
+  cofoci$class<- factor(cofoci$class, levels = c("dip_foci", "dip_crossover", "neo_foci", "neo_crossover","hyb_foci", "hyb_crossover","est_foci", "est_crossover")) #factor data
+  
+  ## Plot comparisons
+    #create boxplot
+    boxplot_plot <- ggplot(data =cofoci, aes(x = class, y = count, color = class)) +
+      geom_boxplot(outlier.shape = NA, fill = "transparent") +  # Fill boxes with transparency
+      labs(x = NULL, y = NULL) +
+      scale_color_manual(values = c("dip_foci" = "limegreen", "dip_crossover" = "limegreen", "neo_foci" = "magenta", "neo_crossover" = "magenta", "hyb_foci" = "orange", "hyb_crossover" = "orange", "est_foci" = "dodgerblue", "est_crossover" = "dodgerblue" )) +
+      theme(axis.text.y = element_text(size = 12))
+    # Overlay jittered points
+    boxplot_plot + geom_jitter(data = cofoci, width = 0.1, height = 0.2,  alpha = 0.25,
+                               aes(x = class, y = count, color = class))
+  
+    
+write_excel_csv (SIM, file = "C:/Users/adri/Documents/R cytology/immuno 2.0/SIM2.csv") 
