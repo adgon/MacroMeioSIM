@@ -1,0 +1,200 @@
+library(statmod)
+library(lme4)
+library(readxl)
+library(readr)
+library (glmmTMB)
+library(dplyr)
+library(ggplot2)
+library(performance)
+library (DHARMa)
+library (emmeans)
+
+
+###Upload and manage data
+metaphase <- read_excel("R cytology/immuno 2.0/metaphase_I_results.xlsx") ## load data file 
+files <- read_csv("~/R cytology/immuno 2.0/metaphase_I_results.xlsx")
+
+
+  ## Select  comparability classes
+  all<-c("A","B","C","D","E")
+  no_bad<-c("A","B","C","D")
+  only_decent<-c("A","B","C")
+  only_best <- c("A","B")
+  
+  qselection<- only_best
+  
+  metaphase <- filter(metaphase, (scorability %in% qselection))
+
+  ## Reorder the levels in the new dataset
+  metaphase$genotype <- factor(metaphase$genotype, levels = c("NEO", "HYB", "EST"))
+  
+  ## Calculate aggregate statistics
+  q_means <- aggregate(metaphase$quadrivalents , by = list(Category = metaphase$genotype), FUN = mean) # mean count
+  q_sd <- aggregate(metaphase$quadrivalents, by = list(Category = metaphase$genotype), FUN = sd) # SD
+  q_median <- aggregate(metaphase$quadrivalents, by = list(Category = metaphase$genotype), FUN = median) # median count
+  q_n <- aggregate(metaphase$quadrivalents, by = list(Category = metaphase$genotype), FUN = length) # number of replicates
+  q_nplants <- aggregate(metaphase$plant, by = list(Category = metaphase$genotype), FUN = n_distinct) # number of plants
+  q_stats <- data.frame(q_means, q_sd, q_median, q_n, q_nplants)
+    # Combine all statistics into one data frame
+    q_stats <- data.frame(
+      Genotype =c("NEO", "HYB", "EST"), # Using the first dataframe's 'Genotype' column
+      Mean = q_means$x,
+      SD = q_sd$x,
+      Median = q_median$x,
+      n = q_n$x,
+      nPlants = q_nplants$x
+    )
+  q_stats
+    
+  ## Fit models
+  
+  qmodel1 <- glmmTMB(quadrivalents ~  genotype *(1|plant), data = metaphase, family = poisson() )
+  qmodel2 <- glmmTMB(quadrivalents ~  genotype *(1|plant), data = metaphase, family = poisson(), ziformula = ~1 )
+  qmodel3 <- glmmTMB(quadrivalents ~  genotype *(1|plant), data = metaphase, family = nbinom2() )
+  qmodel4 <- glmmTMB(quadrivalents ~  genotype *(1|plant), data = metaphase, family = nbinom2(), ziformula = ~1 )
+  qmodel5 <- glmmTMB(quadrivalents ~  genotype *(1|plant:scorability), data = metaphase, family = poisson(), ziformula = ~1 )
+  qmodel6 <- glmmTMB(quadrivalents ~  genotype *(1|plant:scorability), data = metaphase, family = nbinom2())
+  qmodel7 <- glmmTMB(quadrivalents ~  genotype *(1|scorability), data = metaphase, family = poisson())
+  qmodel8 <- glmmTMB(quadrivalents ~  genotype *(1|scorability), data = metaphase, family = poisson(), ziformula = ~1 )
+  qmodel9 <- glmmTMB(quadrivalents ~  genotype *(1|scorability), data = metaphase, family = nbinom2())
+  qmodel10 <- glmmTMB(quadrivalents ~  genotype *(1|scorability), data = metaphase, family = nbinom2(), ziformula = ~1 )
+  
+  ## Compare models and select the best fitting
+  compare_performance(qmodel1, qmodel2, qmodel3, qmodel4, qmodel5, qmodel6, qmodel7,qmodel8,qmodel9, qmodel10)
+  q_glmm <- qmodel9
+
+  ## Model diagnostics for residuals
+  simulation1 <-simulateResiduals(fittedModel = q_glmm, n = 1000, plot= TRUE) # check for assumptions in the residuals: 1. Normality, 2. No over- or under-dispersion, 3. No excess of outliers, 4 Homocestasticity
+  testZeroInflation (q_glmm) #check for zero-inflation
+  testDispersion(q_glmm) #check for under and over-dispersion
+  testQuantiles(simulation1) #check quantiles
+  plotResiduals(q_glmm) # Check overal homoscedasticity
+  plotResiduals(q_glmm, form= metaphase$genotype) # Check homoscedasticity across Genotypes
+  plotResiduals(q_glmm, form= metaphase$plant) # Check homoscedasticity across plants
+  plotResiduals(q_glmm, form= metaphase$scorability) # Check homoscedasticity across coarsening
+  check_collinearity( glmmTMB(quadrivalents ~  genotype + scorability + (1|plant), data = metaphase, family = poisson() ))
+  #check collinearity of variables of candidate model (interactions excluded)
+  check_singularity(q_glmm) #check for singularity (if so means the model is to complex)
+  summary (q_glmm) # summary of the model
+  
+  ## Analize means with emmeans
+  q_emeans <- emmeans(q_glmm, "genotype", type = "response") # extract intercepts
+  q_emeans # print intercepts
+  q_emeans_test <- pairs(q_emeans, adjust= "holm") # pairwise comparisons
+  q_emeans_test
+  
+
+  
+  ## Plot quadrivalent count data
+  boxplot_plot <- ggplot(metaphase, aes(x = genotype, y = quadrivalents, color = genotype)) +
+    geom_boxplot(outlier.shape = NA, fill = "transparent", width = 0.5) +
+    labs(x = NULL, y = NULL, size = 25) +
+    scale_color_manual(values = c("NEO" = "magenta", "HYB" = "orange", "EST" = "dodgerblue"), guide = FALSE) +
+    ylim(0, 8) +
+    theme(axis.text.x = element_text(size = 0),  # Adjust font size of x-axis labels
+          axis.text.y = element_text(size = 20))  # Adjust font size of y-axis labels
+  #Plot and add geom jittter
+  boxplot_plot + 
+    geom_jitter(data = metaphase, width = 0.2, height = 0.2,  alpha = 0.25,
+                             aes(x = genotype, y = quadrivalents, color = genotype))
+  #Plot and add geom jittter + violin
+  boxplot_plot + 
+    geom_jitter(data = metaphase, width = 0.1, height = 0.35,  alpha = 0.25,
+                             aes(x = genotype, y = quadrivalents, color = genotype)) + 
+    geom_violin(data = metaphase, width = 1, alpha = 0.2, 
+                            aes(x = genotype, y = quadrivalents, color = genotype) , bw=0.5)
+  
+  
+
+### Analyze univalent count data
+
+  ###Upload and manage data
+  metaphase <- read_excel("R cytology/immuno 2.0/metaphase_I_results.xlsx") ## load data file 
+
+  ## Select  comparability classes
+  all<-c("A","B","C","D","E")
+  no_bad<-c("A","B","C","D")
+  only_decent<-c("A","B","C")
+  only_best <- c("A","B")
+  
+  uselection<- only_best
+  
+  metaphase <- filter(metaphase, (scorability %in% uselection))
+  
+  ## Reorder the levels in the new dataset
+  metaphase$genotype <- factor(metaphase$genotype, levels = c("NEO", "HYB", "EST"))
+  
+  ## Calculate aggregate statistics
+  u_means <- aggregate(metaphase$univalents , by = list(Category = metaphase$genotype), FUN = mean) # mean count
+  u_sd <- aggregate(metaphase$univalents, by = list(Category = metaphase$genotype), FUN = sd) # SD
+  u_median <- aggregate(metaphase$univalents, by = list(Category = metaphase$genotype), FUN = median) # median count
+  u_n <- aggregate(metaphase$univalents, by = list(Category = metaphase$genotype), FUN = length) # number of replicates
+  u_nplants <- aggregate(metaphase$plant, by = list(Category = metaphase$genotype), FUN = n_distinct) # number of plants
+  u_stats <- data.frame(u_means, u_sd, u_median, u_n, u_nplants)
+  # Combine all statistics into one data frame
+  u_stats <- data.frame(
+    Genotype = c("NEO", "HYB", "EST"), # Using the first dataframe's 'Genotype' column
+    Mean = u_means$x,
+    SD = u_sd$x,
+    Median = u_median$x,
+    n = u_n$x,
+    nPlants = u_nplants$x
+  )
+  u_stats
+  
+  ## Fit models
+  
+  umodel1 <- glmmTMB(univalents ~  genotype *(1|plant), data = metaphase, family = poisson() )
+  umodel2 <- glmmTMB(univalents ~  genotype *(1|plant), data = metaphase, family = poisson(), ziformula = ~1 )
+  umodel3 <- glmmTMB(univalents ~  genotype *(1|plant), data = metaphase, family = nbinom2() )
+  umodel4 <- glmmTMB(univalents ~  genotype *(1|plant), data = metaphase, family = nbinom2(), ziformula = ~1 )
+  umodel5 <- glmmTMB(univalents ~  genotype *(1|plant:scorability), data = metaphase, family = poisson(), ziformula = ~1 )
+  umodel6 <- glmmTMB(univalents ~  genotype *(1|plant:scorability), data = metaphase, family = nbinom2())
+  umodel7 <- glmmTMB(univalents ~  genotype *(1|scorability), data = metaphase, family = poisson())
+  umodel8 <- glmmTMB(univalents ~  genotype *(1|scorability), data = metaphase, family = poisson(), ziformula = ~1 )
+  umodel9 <- glmmTMB(univalents ~  genotype *(1|scorability), data = metaphase, family = nbinom2())
+  umodel10 <- glmmTMB(univalents ~  genotype *(1|scorability), data = metaphase, family = nbinom2(), ziformula = ~1 )
+  
+  ## Compare models and select the best fitting
+  compare_performance(umodel1, umodel2, umodel3, umodel4, umodel5, umodel6, umodel7, umodel8, umodel9, umodel10)
+  u_glmm <- umodel5
+  
+  #Model diagnostics for residuals
+  simulation1 <-simulateResiduals(fittedModel = u_glmm, n = 1000, plot= TRUE) # check for assumptions in the residuals: 1. Normality, 2. No over- or under-dispersion, 3. No excess of outliers, 4 Homocestasticity
+  testZeroInflation (u_glmm) #check for zero-inflation
+  testDispersion(u_glmm) #check for under and over-dispersion
+  testQuantiles(simulation1) #check quantiles
+  plotResiduals(u_glmm) # Check overal homoscedasticity
+  plotResiduals(u_glmm, form= metaphase$genotype) # Check homoscedasticity across Genotypes
+  plotResiduals(u_glmm, form= metaphase$plant) # Check homoscedasticity across plants
+  plotResiduals(u_glmm, form= metaphase$scorability) # Check homoscedasticity across coarsening
+  check_collinearity( glmmTMB(univalents ~  genotype + scorability + (1|plant), data = metaphase, family = poisson() ))   #check collinearity of variables of candidate model (interactions excluded)
+  check_singularity(u_glmm) #check for singularity (if so means the model is to complex)
+  summary (u_glmm) # summary of the model
+  
+  ## Analize means with emmeans
+  u_emeans <- emmeans(u_glmm, "genotype", type = "response") # extract intercepts
+  u_emeans # print intercepts
+  u_emeans_test <- pairs(u_emeans, adjust= "holm") # pairwise comparisons
+  u_emeans_test
+  
+
+boxplot_plot <- ggplot(metaphase, aes(x = genotype, y = univalents, color = genotype)) +
+  geom_boxplot(outlier.shape = NA, fill = "transparent", width = 0.5) +
+  labs(x = NULL, y = NULL, size = 25) +
+  scale_color_manual(values = c("NEO" = "magenta", "HYB" = "orange", "EST" = "dodgerblue"), guide = FALSE) +
+  ylim(0, 8) +
+  theme(axis.text.x = element_text(size = 0),  # Adjust font size of x-axis labels
+        axis.text.y = element_text(size = 20))  # Adjust font size of y-axis labels
+#Plot and add geom jittter
+boxplot_plot + 
+  geom_jitter(data = metaphase, width = 0.2, height = 0.2,  alpha = 0.25,
+              aes(x = genotype, y = univalents, color = genotype))
+#Plot and add geom jittter + violin
+boxplot_plot + 
+  geom_jitter(data = metaphase, width = 0.1, height = 0.35,  alpha = 0.25,
+              aes(x = genotype, y = univalents, color = genotype)) + 
+  geom_violin(data = metaphase, width = 1, alpha = 0.2, 
+              aes(x = genotype, y = univalents, color = genotype) , bw=0.5)
+
+
