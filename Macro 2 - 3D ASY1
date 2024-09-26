@@ -1,0 +1,12 @@
+
+run("Split Channels");
+close();
+run("Duplicate...", "duplicate");
+setAutoThreshold("Moments dark no-reset");
+//run("Threshold...");
+setMinAndMax(130.37, 20332.76);setAutoThreshold("Moments dark no-reset stack");
+run("Convert to Mask", "method=Moments background=Dark black");
+run("Skeletonize (2D/3D)");
+run("Duplicate...", "duplicate");
+
+run("Summarize Skeleton");
