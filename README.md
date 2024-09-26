@@ -1,6 +1,6 @@
 # MeioScope
 
-This repository contains supplementary materials to the manuscript "Changes in synapsis dynamics accompany variation in meiotic stability in Arabidopsis arenosa autotetraploids" by Gonzalo et al. In case of any question of inquiry contact Adrian Gonzalo (adrian.gonzalo@biol.ethz.ch).
+This repository contains some supplementary materials for the manuscript "Changes in synapsis dynamics accompany variation in meiotic stability in Arabidopsis arenosa autotetraploids" by Gonzalo et al. In case of any question of inquiry contact Adrian Gonzalo (adrian.gonzalo@biol.ethz.ch).
 
 There are thre types of files uploaded here:
 
